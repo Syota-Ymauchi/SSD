@@ -137,3 +137,37 @@ class SSD(nn.Module):
             return self.detect.apply(outputs, self.num_classes)
         else:
             return outputs
+
+
+class Detect:
+    def forward(self, output, num_classes, top_k=200, variance=[0.1, 0.2],
+                conf_thresh=0.01, num_thresh=0.45):
+        """
+        output : SSDの出力(loc, conf, priorsの順)
+        num_classes : 検出する物体数+背景
+        top_k : 
+        variance : 
+        conf_thresh : 
+        num_thresh : 
+        """
+        loc_data, conf_data, prior_data = output[0], output[1], output[2] 
+        # conf data : [batch size, 8732, num classes]
+        # 信頼度はsoft maxで確率に直す
+
+        softmax = nn.Softmax(dim=-1)
+        conf_data = softmax(conf_data) # 各DBoxでのクラス毎の確率を計算
+        num = loc_data.size(0) # batc size
+
+        # 出力の配列を準備、中身は今は0 [batc size, 21, 200, 5]
+        output = torch.zeros(num, num_classes, top_k, 5)
+        # conf_data [batc size, 8732, num classes] -> [batch size, num classes, 8732]
+        conf_preds = conf_data.transpose(2, 1)
+        
+        # batch毎に処理をする
+        for i in range(num):
+            # loc_dataとDBoxからBBoxを作成
+            decoded_boxes = self.calc_predicted_offsets(loc_data[i], prior_data, variance)
+    
+    def calc_predicted_offsets(self, loc_data, priors, variance):
+        # 予測オフセットから予測BBoxを計算
+        
