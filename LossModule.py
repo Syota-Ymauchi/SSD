@@ -138,3 +138,5 @@ class SSDLoss(nn.Module):
         loc_loss = F.smooth_l1_loss(loc_preds[pos_mask], loc_targets[pos_mask], reduction='sum')
         loc_loss = loc_loss / num_pos
         return loc_loss
+
+
