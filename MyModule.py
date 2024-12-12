@@ -10,6 +10,15 @@ from model_function import *
 
 
 class L2Norm(nn.Module):
+    """
+    L2正規化レイヤー
+
+    Attributes:
+        n_channels (int): 入力のチャンネル数。
+        gamma (float): 正規化後に適用されるスケーリングパラメータ。
+        eps (float): ゼロ除算を防ぐための小さな値。
+        weight (torch.nn.Parameter): 学習可能なスケーリング重み。
+    """
 
     def __init__(self, n_channels=512, scale=20):
         super().__init__()
@@ -24,8 +33,11 @@ class L2Norm(nn.Module):
 
     def forward(self, X):
         """
-        X : [b * c * h * w]を想定
-        正規化後にはchannel方向のL2Normは1になる
+        Args:
+            X (torch.Tensor): 入力テンソルの形状 [b, c, h, w]。
+
+        Returns:
+            torch.Tensor: 正規化およびスケーリングされた出力テンソル。
         """
         norm = X.pow(2).sum(dim=1, keepdim=True).sqrt() + self.eps # channel方向にL2Normを計算 norm : [b, 1, h, w]
         # 入力をnormで割る
@@ -36,6 +48,17 @@ class L2Norm(nn.Module):
 
 
 class PriorBox:
+    """
+    SSDのための事前（デフォルト）ボックスを生成するクラス。
+
+    Attributes:
+        image_size (int): 入力画像のサイズ。
+        feature_maps (list): 特徴マップのサイズのリスト。
+        steps (list): 各特徴マップのステップのリスト。
+        min_sizes (list): デフォルトボックスの最小サイズのリスト。
+        max_sizes (list): デフォルトボックスの最大サイズのリスト。
+        aspect_rations (list): デフォルトボックスのアスペクト比のリスト。
+    """
 
     def __init__(self):
         self.image_size = 300 # 入力画像のサイズを300 × 300と想定
@@ -48,6 +71,10 @@ class PriorBox:
         self.aspect_rations = [[2], [2, 3], [2, 3], [2, 3], [2], [2]]
 
     def forward(self):
+        """
+        Returns:
+            torch.Tensor: 形状 [num_priors, 4] の事前ボックスのテンソル。
+        """
         mean = []
         for k, f in enumerate(self.feature_maps): # [38, 19, 10, 5, 3, 1]
             for i, j in product(range(f), repeat=2): # 各特徴量マップのセルごとにDBox作成
@@ -74,24 +101,119 @@ class PriorBox:
     
 
 class SSD(nn.Module):
-
     def __init__(self, phase='train', num_classes=21):
         super().__init__()
         self.phase = phase
         self.num_classes = num_classes
-        self.vgg = make_vgg()
-        self.extras = make_extras()
+        
+        # VGGベースのネットワークを構築
+        self.vgg = self._make_vgg()
+        # 追加レイヤーを構築
+        self.extras = self._make_extras()
         self.L2Norm = L2Norm()
-        self.loc = make_loc()
-        self.conf = make_coef()
+        # 位置とクラスの予測レイヤーを構築
+        self.loc = self._make_loc()
+        self.conf = self._make_conf()
+        
+        # デフォルトボックスを生成
         dbox = PriorBox()
-        self.priors = dbox.forward() # self.priorsには各解像度の各セルに対してのDBoxが4or6個格納されている
+        self.priors = dbox.forward()
+        
         if phase == 'test':
             self.detect = Detect()
-            
+
+    def _make_vgg(self):
+        """VGGベースのネットワークを構築する
+
+        Returns:
+            nn.ModuleList: VGGベースのネットワーク層のリスト
+        """
+        cfg = [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'C',
+               512, 512, 512, 'M', 512, 512, 512]
+        layers = []
+        in_channels = 3
+        for v in cfg:
+            if v == 'M':
+                layers += [nn.MaxPool2d(kernel_size=2)]  # 出力サイズを切り捨て(デフォルトでceil_mode=False)
+            elif v == 'C':
+                layers += [nn.MaxPool2d(kernel_size=2, ceil_mode=True)]  # 出力サイズを切り上げ
+            else:
+                conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+                layers += [conv2d, nn.ReLU()]  # 畳み込み層とReLU活性化関数を追加
+                in_channels = v  # 次の層の入力チャンネル数を更新
+        
+        pool5 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        conv6 = nn.Conv2d(512, 1024, kernel_size=3, padding=6, dilation=6)
+        conv7 = nn.Conv2d(1024, 1024, kernel_size=1)
+        layers += [pool5, conv6, nn.ReLU(), conv7, nn.ReLU()]
+
+        return nn.ModuleList(layers)
+
+    def _make_extras(self):
+        """追加レイヤーを構築する
+        VGGベース以降の特徴抽出層を構築
+
+        Returns:
+            nn.ModuleList: 追加レイヤーのリスト
+        """
+        layers = [
+            # out3
+            nn.Conv2d(1024, 256, kernel_size=1),
+            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
+            # out4
+            nn.Conv2d(512, 128, kernel_size=1),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            # out5
+            nn.Conv2d(256, 128, kernel_size=1),
+            nn.Conv2d(128, 256, kernel_size=3),
+            # out6
+            nn.Conv2d(256, 128, kernel_size=1),
+            nn.Conv2d(128, 256, kernel_size=3),
+        ]
+        return nn.ModuleList(layers)
+
+    def _make_loc(self):
+        """位置予測レイヤーを構築する
+        各特徴マップに対して、DBoxのオフセットを予測する層を構築
+
+        Returns:
+            nn.ModuleList: 位置予測レイヤーのリスト
+        """
+        layers = [
+            nn.Conv2d(512, 4*4, kernel_size=3, padding=1),    # out1: 4つのDBox
+            nn.Conv2d(1024, 6*4, kernel_size=3, padding=1),   # out2: 6つのDBox
+            nn.Conv2d(512, 6*4, kernel_size=3, padding=1),    # out3: 6つのDBox
+            nn.Conv2d(256, 6*4, kernel_size=3, padding=1),    # out4: 6つのDBox
+            nn.Conv2d(256, 4*4, kernel_size=3, padding=1),    # out5: 4つのDBox
+            nn.Conv2d(256, 4*4, kernel_size=3, padding=1)     # out6: 4つのDBox
+        ]
+        return nn.ModuleList(layers)
+
+    def _make_conf(self):
+        """クラス予測レイヤーを構築する
+        各特徴マップに対して、DBoxごとのクラス予測を行う層を構築
+
+        Returns:
+            nn.ModuleList: クラス予測レイヤーのリスト
+        """
+        layers = [
+            nn.Conv2d(512, 4*self.num_classes, kernel_size=3, padding=1),    # out1: 4つのDBox
+            nn.Conv2d(1024, 6*self.num_classes, kernel_size=3, padding=1),   # out2: 6つのDBox
+            nn.Conv2d(512, 6*self.num_classes, kernel_size=3, padding=1),    # out3: 6つのDBox
+            nn.Conv2d(256, 6*self.num_classes, kernel_size=3, padding=1),    # out4: 6つのDBox
+            nn.Conv2d(256, 4*self.num_classes, kernel_size=3, padding=1),    # out5: 4つのDBox
+            nn.Conv2d(256, 4*self.num_classes, kernel_size=3, padding=1)     # out6: 4つのDBox
+        ]
+        return nn.ModuleList(layers)
+
     def forward(self, X):
         """
-        X : [b, c, h=300, w=300]
+        Args:
+            X (torch.Tensor): 入力テンソル [b, c, h=300, w=300]
+
+        Returns:
+            tuple: 位置予測、クラス予測、デフォルトボックスのタプル
+                  または検出結果（テストフェーズの場合）
         """
         bs = X.shape[0]
         # lout = []  各セルのオフセットの予測が格納
@@ -134,6 +256,9 @@ class SSD(nn.Module):
         
 
 class Detect:
+    """
+    SSDの検出結果をNMSを通して出力するクラス
+    """
     def forward(self, output, num_classes, top_k=200, variances=[0.1, 0.2],
                 conf_thresh=0.01, num_thresh=0.45):
         """

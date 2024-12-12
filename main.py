@@ -1,3 +1,4 @@
+import os
 import matplotlib.pyplot as plt
 import torch
 from torch import optim
@@ -7,8 +8,12 @@ from torchvision.datasets import VOCDetection
 
 from learn import learn
 from MyModule import SSD
+from visuable_detections import visuable_detections
 
-def main():
+class_labels = ['background','aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 
+               'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
+
+def main(phase):
     train_transform = transforms.Compose([
         transforms.Resize((300, 300)),
         transforms.RandomHorizontalFlip(p=0.5), # 左右反転
@@ -17,7 +22,7 @@ def main():
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) # 0~1 => -1 ~ 1
     ])
-    val_transform = transforms.Compose([
+    val_and_test_transform = transforms.Compose([
         transforms.Resize((300, 300)),
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) # 0~1 => -1 ~ 1
@@ -33,25 +38,44 @@ def main():
     
     # ハイパーパラメータの定義
     batch_size = 8
-    num_epochs = 10
+    num_epochs = 30
     num_classes = 21
 
     train_dataset = VOCDetection(root='./dataset/voc_data', year='2012', image_set='train', \
                                  download=True, transform=train_transform)
-    val_dataset = VOCDetection(root='./dataset/val_voc_data', year='2012', image_set='val', \
-                               download=True, transform=val_transform)
+    val_dataset = VOCDetection(root='./dataset/val_voc_data', year='2012', image_set='trainval', \
+                               download=True, transform=val_and_test_transform)
+    test_dataset =VOCDetection(root='./dataset/val_voc_data', year='2012', image_set='val', \
+                               download=True, transform=val_and_test_transform)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
 
     # モデルの定義
-    ssd = SSD()
+    ssd = SSD(phase)
+    save_path = './content/drive/My Drive/NN-個人/ssd_model/ssd_model.pth'
+    # フォルダが存在するか確認
+    if not os.path.exists(save_path):
+        # 存在しない場合、新しくフォルダを作成
+        os.makedirs(save_path)
+
     opt = optim.Adam(ssd.parameters(), lr=0.03, weight_decay=1e-4)
     
     device = torch.device('cuda'if torch.cuda.is_available() else 'cpu')
-    train_total_losses, val_total_losses, train_loc_losses, val_loc_losses, train_cls_losses, val_cls_losses = \
-    learn(ssd, num_epochs, opt, train_loader, val_loader, num_classes=num_classes , save_path=None, early_stop=False, device=device)
-
+    if phase == 'train':
+        train_total_losses, val_total_losses, train_loc_losses, val_loc_losses, train_cls_losses, val_cls_losses = \
+        learn(ssd, num_epochs, opt, train_loader, val_loader, num_classes=num_classes , save_path=save_path, early_stop=False, device=device)
+    elif phase == 'test':
+        # モデルの読み込み
+        ssd.load_state_dict(torch.load(save_path))
+        images, _  = next(iter(test_loader))
+        detections = ssd(images)
+        visuable_detections(images.numpy(), detections, class_labels, threshold=0.75)
+    else:
+        ValueError('not suport pahse choose in "train or "test"')
 if __name__ == "__main__":
+    phase = str(input('Write phase in "train" or "test"'))
     main()
 
 
