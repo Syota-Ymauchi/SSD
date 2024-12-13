@@ -134,6 +134,7 @@ class SSDLoss(nn.Module):
         Returns:
             Tensor: オフセット。
         """
+        eps = 1e-6  # ゼロ除算防止用の小さな値
         # (x_min + x_max) / 2 : バウンディングボックスの中心x座標
         cx = (gt_box[:, 0] + gt_box[:, 2]) / 2 
         # バウンディングボックスの中心y座標
@@ -154,8 +155,9 @@ class SSDLoss(nn.Module):
         # 式の内容はQiitaの物体検出SSD-1 : 物体検出で使う用語の整理(1) 参照
         d_cx = (cx - cx_d) / (0.1 * w_d)
         d_cy = (cy - cy_d) / (0.1 * h_d)
-        d_w = torch.log(w / w_d) / 0.2
-        d_h = torch.log(h / h_d) / 0.2
+        # 幅と高さのオフセット
+        d_w = torch.log(torch.clamp(w / (w_d + eps), min=1e-6)) / 0.2
+        d_h = torch.log(torch.clamp(h / (h_d + eps), min=1e-6)) / 0.2
         offsets = torch.stack([d_cx, d_cy, d_w, d_h], dim=1)
         return offsets
 

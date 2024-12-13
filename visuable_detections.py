@@ -15,12 +15,15 @@ def visuable_detections(image, detections, class_labels, threshold=0.5):
         image = image.numpy()
     # 画像サイズ
     image_height, image_width, _ = image.shape
+    # 標準化を戻す
+    image = image * 0.5 + 0.5
+    # バウンディングボックスの可視化
     # バッチサイズを考慮して最初の画像のみ取り出す
     batch_detections = detections[0] # [num_classes, top_k, 5]
 
     fig, ax = plt.subplots(figsize=(12, 8))
     ax.set_title("Detected Objects")
-    ax.imshow(image)
+    ax.imshow(image.transpose(1, 2, 0))
 
     num_classes = batch_detections.size(0) 
     for cls_id in range(1, num_classes): # 背景は可視化しない

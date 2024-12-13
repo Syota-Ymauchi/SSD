@@ -13,6 +13,13 @@ from visuable_detections import visuable_detections
 class_labels = ['background','aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 
                'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
 
+def get_valid_phase():
+    while True:
+        phase = input('学習フェーズは"train"、テストフェーズは"test"を入力してください: ')
+        if phase in ['train', 'test']:
+            return phase
+        print('無効な入力です。"train"または"test"を入力してください。')
+
 def main(phase):
     train_transform = transforms.Compose([
         transforms.Resize((300, 300)),
@@ -54,7 +61,7 @@ def main(phase):
 
     # モデルの定義
     ssd = SSD(phase)
-    save_path = './content/drive/MyDrive/NN-個人/ssd_model/ssd_model.pth'
+    save_path = './ssd_model/model.pth' # 自分でパスを設定
     # フォルダが存在するか確認
     if not os.path.exists(save_path):
         # 存在しない場合、新しくフォルダを作成
@@ -70,12 +77,12 @@ def main(phase):
         # モデルの読み込み
         ssd.load_state_dict(torch.load(save_path))
         images, _  = next(iter(test_loader))
-        detections = ssd(images)
-        visuable_detections(images.numpy(), detections, class_labels, threshold=0.75)
+        detections = ssd(images[0].unsqueeze(0))
+        visuable_detections(images[0].numpy(), detections, class_labels, threshold=0.75)
     else:
         ValueError('not suport pahse choose in "train or "test"')
 if __name__ == "__main__":
-    phase = str(input('Write phase in "train" or "test"'))
-    main()
+    phase = get_valid_phase()
+    main(phase)
 
 

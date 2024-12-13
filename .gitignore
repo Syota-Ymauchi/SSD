@@ -3,3 +3,6 @@
 __pycache__/
 dataset/
 *.ipynb
+dataset/
+ssd_model/
+*.pth

@@ -27,16 +27,31 @@ def learn(model, num_epochs, optimizer, train_loader,
         running_val_cls_losses = 0.0
 
         model.train()
-        for imgs, anotations in tqdm(train_loader, desc='now training',
+        for imgs, annotations in tqdm(train_loader, desc='now training',
                                      total=len(train_loader), leave=False):
-            # forward
             imgs = imgs.to(device)
-            anotations = anotations
             optimizer.zero_grad()
-            lout, cout, priors = model.forward(imgs)
+            outputs = model(imgs)
+            loc_preds, cls_preds, priors = outputs
+
+            # NaNチェック
+            if torch.isnan(loc_preds).any():
+                print("NaN detected in loc_preds")
+            if torch.isnan(cls_preds).any():
+                print("NaN detected in cls_preds")
+
+            # 損失計算
+            total_loss, cls_loss, loc_loss = criterion(loc_preds, cls_preds, annotations)
+
+            # 損失にNaNが含まれていないか確認
+            if torch.isnan(total_loss):
+                print("NaN detected in total_loss")
+            if torch.isnan(loc_loss):
+                print("NaN detected in loc_loss")
+            if torch.isnan(cls_loss):
+                print("NaN detected in cls_loss")
             
-            # loss, backward
-            total_loss, cls_loss, loc_loss = criterion(lout, cout, anotations)
+            # バックプロパゲーション
             total_loss.backward()
             optimizer.step()
 

@@ -58,7 +58,7 @@ class L2Norm(nn.Module):
 class Detect:
     """SSDの検出結果をNMSを通して出力するクラス
     """
-    def forward(self, output, num_classes, top_k=200, variances=[0.1, 0.2],
+    def apply(self, output, num_classes, top_k=200, variances=[0.1, 0.2],
                 conf_thresh=0.01, nms_thresh=0.45):
         """SSDの検出結果からNMSを適用して最終的な検出結果を出力する
 
@@ -77,155 +77,166 @@ class Detect:
             torch.Tensor: 検出結果 [batch_size, num_classes, top_k, 5]
                 5は[score, x_min, y_min, x_max, y_max]を表す
         """
-        # オフセット, クラス毎の信頼度, デフォルトボックスを取得(outputはタプルなのでインデックスでアクセス)
-        loc_data, conf_data, prior_data = output[0], output[1], output[2] 
-        # conf data : [bs, 8732, num classes(21)]
-        # 信頼度logitsのままなのでsoftmaxで確率に直す
+        loc_data, conf_data, prior_data = output[0], output[1], output[2]
+        
+        # 数値の安定性のためにeps追加
+        eps = 1e-6
+        # NaNチェック
+        if torch.isnan(loc_data).any():
+            print("Warning: NaN detected in loc_data")
+        if torch.isnan(conf_data).any():
+            print("Warning: NaN detected in conf_data")
+        if torch.isnan(prior_data).any():
+            print("Warning: NaN detected in prior_data")
+
+        batch_size = loc_data.size(0)
+        
+        # conf_dataをsoftmaxで確率に変換（数値安定性のため、大きな負の値を避ける）
+        conf_data = torch.clamp(conf_data, min=-100, max=100)  # 極端な値を制限
         softmax = nn.Softmax(dim=-1)
-        # 各DBoxでのクラス毎の確率を計算
-        conf_data = softmax(conf_data) 
-        # batch sizeを取得
-        batch_size = loc_data.size(0) 
+        conf_data = softmax(conf_data)
 
-        # 出力の配列を準備、中身は今は0 [batch size, num classes(21), top_k(200), 5]
-        # output の最後の次元(5)は、各検出結果について 1つのスコアと4つのバウンディングボックス座標を保持するため
+        # 出力用テンソルを準備
         output = torch.zeros(batch_size, num_classes, top_k, 5)
-
-        # conf_dataの2次元目と3次元目を入れ替え
-        # conf_data : [bs, 8732, num classes] -> [bs, num classes, 8732]
         conf_preds = conf_data.transpose(2, 1)
 
-        # バッチデータを1毎ずつ処理をする
+        # バッチ処理
         for i in range(batch_size):
-            # i番目のバッチデータに対してBBoxを計算
-            # オフセットの予測値からBBoxの座標を計算
-            # オフセットの予測値はloc_data[i]で取得
-            # デフォルトボックスはprior_dataで取得
-            # 正規化係数はvariancesで取得
-            # 計算結果はpred_bboxesに格納
-            # pred_bboxesの形状は[DBoxの数(8732), x_min, y_min, x_max, y_maxの4つの値(4)]
-            pred_bboxes = self.calc_predicted_offsets(loc_data[i], prior_data, variances)
-            # conf_predsから独立したコピーを作成
-            # i番目のバッチデータに対してconf_scoresを作成
-            # conf_scores : [num classes, 8732]のテンソル
+            # BBoxの座標を計算
+            pred_bboxes = self.calc_predicted_bboxes(loc_data[i], prior_data, variances)
+            
+            # 座標が有効な範囲内にあることを確認
+            pred_bboxes = torch.clamp(pred_bboxes, min=0, max=1)
+            
             conf_scores = conf_preds[i].clone()
-            # 各クラスの処理
+
+            # クラスごとの処理
             for cl in range(1, num_classes):
-                # conf_scoresで信頼度がconf_thresh(0.01なら1%)以上のインデックスを求める
-                # torch.gt(tensor, 閾値) : greater than (>)"、つまり「大なり」を判定するための関数
-                # 各バウンディングボックスにクラスclが検出されたらTrue
-                # c_mask : [8732]のテンソル
-                c_mask = conf_scores[cl].gt(conf_thresh) 
-                # conf_thresh以上の信頼度の集合を作る
-                # クラスclにおいてあるconf_threshを超えたものの値のみが入っている(インデックスは無視)
-                scores = conf_scores[cl][c_mask]    
-                # conf_threshを越えるものが無かったクラスはcontinue処理をする
+                c_mask = conf_scores[cl].gt(conf_thresh)
+                scores = conf_scores[cl][c_mask]
+                
+                # 閾値以上のscoreがない
                 if scores.size(0) == 0:
                     continue
-                # 確信度がconf_threshを超えるバウンディングボックスをマスクする
-                # c_mask: [8732] のブールテンソル (True: 閾値を超える, False: 閾値以下)
-                c_mask = conf_scores[cl].gt(conf_thresh) 
+                
+                l_mask = c_mask.unsqueeze(1).expand_as(pred_bboxes)
+                boxes = pred_bboxes[l_mask].view(-1, 4)
 
-                # c_maskの次元を拡張してpred_bboxesと同じ形状にする
-                # c_mask: [8732] -> [8732, 1] に変換し、さらに各座標に適用可能な形状にする
-                # l_mask: [8732, 4] のブールテンソル
-                l_mask = c_mask.unsqueeze(1).expand_as(pred_bboxes) 
-                # conf_thresh以上の予測BBoxを取り出す
-                # 各クラスに対して、信頼度がconf_threshを超えるバウンディングボックスをフィルタリング
-                # l_maskをdecoded_bboxesに適用できるようにサイズを変更
-                # c_mask [True, False, True...] のブールマスクを [8732, 4] に拡張
-                # マスクされたBBoxを取り出す
-                boxes = pred_bboxes[l_mask].view(-1, 4)  
-
-                # BBoxにNon-Maximum Suppression (NMS)を適用
-                # self.nms関数は、重複するバウンディングボックスを除去し、最も信頼度の高いBBoxを保持する
-                # idsはNMSを適用した後の選択されたBBoxのインデックス
-                # countはNMSを通過して選ばれたBBoxの数
+                # 無効なボックスをフィルタリング
+                # Trueのものを残す
+                valid_box_mask = (boxes[:, 2] > boxes[:, 0] + eps) & (boxes[:, 3] > boxes[:, 1] + eps)
+                # 全て無効なBBoxだった場合に適用される(Trueが1つもなかった)
+                if valid_box_mask.sum() == 0:
+                    continue
+                # フィルタリングを実施
+                boxes = boxes[valid_box_mask]
+                scores = scores[valid_box_mask]
+                # NMSの適用
                 ids, count = self.nms(boxes, scores, nms_thresh, top_k)
-                # 結果をoutputテンソルに格納
-                # scores[ids[:count]]: 選択されたBBoxの信頼度スコア
-                # scores[ids[:count]].unsqueeze(1): スコアを列ベクトルに変換
-                # boxes[ids[:count]]: 選択されたBBoxの座標
-                # torch.catにより、スコアとBBox座標を連結し、[count, 5] の形状にする
-                # output[i, cl, :count] に格納することで
-                # バッチi、クラスclに対して上位count個のBBoxとスコアを保存
-                output[i, cl, :count] = torch.cat((scores[ids[:count]].unsqueeze(1),
-                                               boxes[ids[:count]]), dim=1)  # [count, 5]
+                
+                # 結果の格納
+                if count > 0:
+                    output[i, cl, :count] = torch.cat((scores[ids[:count]].unsqueeze(1),
+                                                   boxes[ids[:count]]), dim=1)
+
         return output
-             
+
     def calc_predicted_bboxes(self, loc_data, priors, variances):
         """画像1枚に関してBBoxの座標をオフセットの予測値から計算する
-        数式の説明はQiitaの物体検出SSD-1 : 物体検出で使う用語の整理(1)を参照
+        
         Args:
-            loc_data (torch.Tensor): オフセットの予測値で形状は[8732, 4]
-            priors (torch.Tensor): デフォルトボックスで形状は[8732, 4]
+            loc_data (torch.Tensor): オフセットの予測値 [8732, 4]
+            priors (torch.Tensor): デフォルトボックス [8732, 4]
             variances (list): オフセットの予測値を正規化するための係数
+
         Returns:
-            bboxes_pred (torch.Tensor): 予測BBoxで形状は[8732, 4]
+            torch.Tensor: 予測BBox [8732, 4]
         """
-        # オフセットから中心座標(cx, cy)を計算
-        # cx = prior_cx + loc_cx * variance[0] * prior_w
-        bbox_center_x = priors[:, 0] + loc_data[:, 0] * variances[0] * priors[:, 2]  
-        # cy = prior_cy + loc_cy * variance[0] * prior_h
-        bbox_center_y = priors[:, 1] + loc_data[:, 1] * variances[0] * priors[:, 3] 
+        # 数値の安定性のためにeps追加
+        eps = 1e-6
 
-        # オフセットから幅(w)と高さ(h)を計算
-        # w = prior_w * exp(loc_w * variance[1])
-        bbox_width = priors[:, 2] * torch.exp(loc_data[:, 2] * variances[1])  
-        # h = prior_h * exp(loc_h * variance[1])
-        bbox_height = priors[:, 3] * torch.exp(loc_data[:, 3] * variances[1]) 
+        # NaNチェック
+        if torch.isnan(loc_data).any():
+            print("Warning: NaN detected in loc_data")
+        if torch.isnan(priors).any():
+            print("Warning: NaN detected in priors")
 
-        # 中心座標と幅・高さからバウンディングボックスの座標を計算
-        # [cx, cy, w, h] -> [x_min, y_min, x_max, y_max]
-        # x_min = cx - w/2
+        # priorsの幅と高さが0より大きいことを確認
+        if (priors[:, 2] <= eps).any() or (priors[:, 3] <= eps).any():
+            print("Warning: Some priors have non-positive width or height")
+            # 必要に応じて小さな値でクリップ
+            priors = torch.clamp(priors, min=eps)
+
+        # オフセットから中心座標を計算
+        bbox_center_x = priors[:, 0] + loc_data[:, 0] * variances[0] * priors[:, 2]
+        bbox_center_y = priors[:, 1] + loc_data[:, 1] * variances[0] * priors[:, 3]
+
+        # オフセットから幅と高さを計算（数値安定性のため、expの入力を制限）
+        loc_w = torch.clamp(loc_data[:, 2] * variances[1], min=-4.0, max=4.0)
+        loc_h = torch.clamp(loc_data[:, 3] * variances[1], min=-4.0, max=4.0)
+        
+        bbox_width = priors[:, 2] * torch.exp(loc_w)
+        bbox_height = priors[:, 3] * torch.exp(loc_h)
+
+        # 座標を計算
         bbox_x_min = bbox_center_x - bbox_width / 2
-        # y_min = cy - h/2
         bbox_y_min = bbox_center_y - bbox_height / 2
-        # x_max = cx + w/2
         bbox_x_max = bbox_center_x + bbox_width / 2
-        # y_max = cy + h/2
         bbox_y_max = bbox_center_y + bbox_height / 2
 
-        # 最終的な予測バウンディングボックスを作成
-        # torch.stack: 指定した次元(dim)に沿って複数のテンソルを結合する
-        # 入力: リスト形式の複数のテンソル。各テンソルは同じサイズである必要がある
-        # dim=1: 1次元目（列方向）に結合
-        # 例: [8732], [8732], [8732], [8732] -> [8732, 4]
-        bboxes_pred = torch.stack([bbox_x_min, bbox_y_min, bbox_x_max, bbox_y_max], dim=1)  
-        return bboxes_pred  # 形状は[8732, 4]
-    
+        # 座標を[0, 1]の範囲にクリップ
+        bboxes_pred = torch.stack([
+            torch.clamp(bbox_x_min, min=0, max=1),
+            torch.clamp(bbox_y_min, min=0, max=1),
+            torch.clamp(bbox_x_max, min=0, max=1),
+            torch.clamp(bbox_y_max, min=0, max=1)
+        ], dim=1)
+
+        return bboxes_pred
+
     def nms(self, bboxes, scores, overlap=0.45, top_k=200):
-        """Non-Maximum Suppression(NMS)を適用して、重複するバウンディングボックスを除去する
+        """Non-Maximum Suppressionを適用
+        
         Args:
-            bboxes : あるクラスclの識別確率がconf_thresh以上のBBox [conf_tresh以上のBBoxの数, 4]
-            scores : バウンディングボックスのあるクラスclの識別確率(信頼度) 
-            overlap : 重複するバウンディングボックスを除去するためのIoUの閾値
-            top_k : 最大上位k件を保持する
+            bboxes (torch.Tensor): バウンディングボックス [N, 4]
+            scores (torch.Tensor): 信頼度スコア [N]
+            overlap (float): IoUの閾値
+            top_k (int): 保持する検出結果の最大数
+
         Returns:
-            keep : 選択されたBBoxのインデックス
-            count : 選択されたBBoxの数
+            tuple: (選択されたインデックス, 選択された数)
         """
+        # 数値の安定性のためにeps追加
+        eps = 1e-6
+
+        # NaNチェック
+        if torch.isnan(bboxes).any():
+            print("Warning: NaN detected in bboxes")
+        if torch.isnan(scores).any():
+            print("Warning: NaN detected in scores")
+
         keep = torch.zeros(scores.size(0), dtype=torch.long, device=scores.device)
-        v, idx = scores.sort(0)  # 昇順にソート
-        idx = idx[-top_k:]  # 上位top_k件を取得
+        
+        # スコアでソート
+        v, idx = scores.sort(0)
+        idx = idx[-top_k:]  # 上位top_k個を取得
+        
         count = 0
 
         while idx.numel() > 0:
-            i = idx[-1]  # 最も高いスコアのインデックスを選択
+            i = idx[-1]
             keep[count] = i
             count += 1
-            if idx.size(0) == 1:  # 残りが1つなら終了
+            
+            if idx.size(0) == 1:
                 break
-            idx = idx[:-1]  # 現在選択したボックスを削除
+                
+            idx = idx[:-1]
 
-            # box_iouの使用
-            # bboxes[i].unsqueeze(0): 形状を[1, 4]に変更（1つのボックス）
-            # bboxes[idx]: 残りのボックス [M, 4]
-            # 戻り値: [1, M]のテンソル（選択したボックスと残りのボックスとのIoU）
-            # [0]でサイズ1の次元を削除し、[M]の形状にする
+            # IoU計算
             ious = box_iou(bboxes[i].unsqueeze(0), bboxes[idx])[0]
             
-            # IoUがoverlap以下のボックスのみを残す（重複していないボックスを保持）
+            # 重複するボックスを除去
             idx = idx[ious <= overlap]
 
         return keep[:count], count
@@ -308,6 +319,12 @@ class PriorBox:
         output = torch.Tensor(mean).view(-1, 4)
         # 0~1の範囲にクリップ
         output.clamp_(max=1, min=0)
+        # デフォルトボックスの幅と高さがゼロでないことを確認
+        if (output[:, 2] <= 0).any() or (output[:, 3] <= 0).any():
+            print("Warning: Some default boxes have non-positive width or height.")
+            print("Problematic boxes:", output[output[:, 2] <= 0])
+            print("Problematic boxes:", output[output[:, 3] <= 0])
+
         return output 
     
 
@@ -565,7 +582,7 @@ class SSD(nn.Module):
             # reshapeの処理
             # テンソルの形状を変更する
             #　[bs, h, w, c(4×4 or 6×4)] のテンソルを [bs, h*w*c, 4] に変換
-            # これでout[i]のオフセットの予測が得られる
+            # これでout[i]のオフセットの予測��得られる
             lx = self.loc[i](out[i]).permute(0,2,3,1).reshape(bs, -1, 4)
             # クラス毎の信頼度に関する処理
             # permuteの処理
