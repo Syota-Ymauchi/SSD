@@ -38,7 +38,7 @@ def main(phase):
     
     # ハイパーパラメータの定義
     batch_size = 8
-    num_epochs = 30
+    num_epochs = 8
     num_classes = 21
 
     train_dataset = VOCDetection(root='./dataset/voc_data', year='2012', image_set='train', \
@@ -54,7 +54,7 @@ def main(phase):
 
     # モデルの定義
     ssd = SSD(phase)
-    save_path = './content/drive/My Drive/NN-個人/ssd_model/ssd_model.pth'
+    save_path = './content/drive/MyDrive/NN-個人/ssd_model/ssd_model.pth'
     # フォルダが存在するか確認
     if not os.path.exists(save_path):
         # 存在しない場合、新しくフォルダを作成

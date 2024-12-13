@@ -27,11 +27,12 @@ def visuable_detections(image, detections, class_labels, threshold=0.5):
         class_detections = batch_detections[cls_id] # [top_k, 5] : [[0.892, x_min, y_min, x_max, y_min],...]]
         for i in range(class_detections.size(0)): # top_kの検出結果を処理
             score = class_detections[i, 0].item()
-            if score < threshold: # 閾値以下ならスキップ(scoreはソートされているので)
+            if score < threshold: # 閾値以下ならスキップ
                 continue
 
             # バウンディングボックスの座標を取得
-            x_min, y_min, x_max, y_max = class_detections[i, 1:].tolist() #リストに格納(.item()も適用される)
+            # リストに格納(.item()も自動的に適用される)
+            x_min, y_min, x_max, y_max = class_detections[i, 1:].tolist()
 
             # 正規化されているので画像サイズに変換
             x_min = x_min * image_width
