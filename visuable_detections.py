@@ -1,6 +1,5 @@
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import torch
 
 def visuable_detections(image, detections, class_labels, threshold=0.5):
     """バウンディングボックスを可視化するための関数
@@ -12,7 +11,7 @@ def visuable_detections(image, detections, class_labels, threshold=0.5):
         threshold: 可視化する信頼度の閾値
     """
     # 画像データが Tensor の場合、ndarray に変換
-    if hasattr(image, 'numpy'):
+    if hasattr(image, 'torch.Tensor'):
         image = image.numpy()
     # 画像サイズ
     image_height, image_width, _ = image.shape
